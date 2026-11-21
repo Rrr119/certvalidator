@@ -37,6 +37,12 @@ revocation checks.
      - Policy constraints
      - Policy mapping
      - Inhibit anyPolicy
+   - Name constraints
+     - Distinguished names
+     - DNS names
+     - Email addresses
+     - URIs
+     - IP addresses
    - Failure on unknown/unsupported critical extensions
  - TLS/SSL server validation
  - Whitelisting certificates
@@ -51,10 +57,6 @@ revocation checks.
    - Caching of CRLs/OCSP responses
  - CRL and OCSP HTTP clients
  - Point-in-time validation
-
-Unsupported features:
- 
- - Name constraints
 
 ## Related Crypto Libraries
 

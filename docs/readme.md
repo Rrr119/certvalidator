@@ -13,7 +13,6 @@ The documentation consists of the following topics:
 *certvalidator* implements the following algorithms:
 
  - [X.509/CRL] [Certificate Path Validation algorithm from RFC 5280 Section 5](https://tools.ietf.org/html/rfc5280#section-6)
-   - Minus name constraints
  - [OCSP] [Signed Response Acceptance Requirements from RFC 6960](https://tools.ietf.org/html/rfc6960#section-3.2)
  - [TLS] [DNS-ID and CN-ID Matching from RFC 6125](https://tools.ietf.org/html/rfc6125#section-6)
 
@@ -34,6 +33,12 @@ Supported features include:
      - Policy constraints
      - Policy mapping
      - Inhibit anyPolicy
+   - Name constraints
+     - Distinguished names
+     - DNS names
+     - Email addresses
+     - URIs
+     - IP addresses
    - Failure on unknown/unsupported critical extensions
  - TLS/SSL server validation
  - Whitelisting certificates
@@ -48,10 +53,6 @@ Supported features include:
    - Caching of CRLs/OCSP responses
  - CRL and OCSP HTTP clients
  - Point-in-time validation
-
-Currently unsupported features:
- 
- - Name constraints
 
 Testing is performed using:
 

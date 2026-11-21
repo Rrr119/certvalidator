@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 import binascii
 
-from asn1crypto import crl, ocsp
+from asn1crypto import crl, ocsp, x509
 from asn1crypto.util import timezone
 
 from . import ocsp_client, crl_client
@@ -99,10 +99,29 @@ class ValidationContext():
     # or "require"
     _revocation_mode = None
 
+    # A set of unicode strings of certificate policy OIDs to use as the
+    # initial-policy-set. The special value "any_policy" indicates any policy
+    # is acceptable.
+    initial_policy_set = None
+
+    # Bools for the initial-explicit-policy, initial-policy-mapping-inhibit and
+    # initial-any-policy-inhibit inputs to the path validation algorithm
+    initial_explicit_policy = False
+    initial_policy_mapping_inhibit = False
+    initial_any_policy_inhibit = False
+
+    # Lists of asn1crypto.x509.GeneralSubtree objects to use as the
+    # initial-permitted-subtrees and initial-excluded-subtrees inputs
+    initial_permitted_subtrees = None
+    initial_excluded_subtrees = None
+
     def __init__(self, trust_roots=None, extra_trust_roots=None, other_certs=None,
                  whitelisted_certs=None, moment=None, allow_fetching=False, crls=None,
                  crl_fetch_params=None, ocsps=None, ocsp_fetch_params=None,
-                 revocation_mode="soft-fail", weak_hash_algos=None):
+                 revocation_mode="soft-fail", weak_hash_algos=None,
+                 initial_policy_set=None, initial_explicit_policy=False,
+                 initial_policy_mapping_inhibit=False, initial_any_policy_inhibit=False,
+                 initial_permitted_subtrees=None, initial_excluded_subtrees=None):
         """
         :param trust_roots:
             If the operating system's trust list should not be used, instead
@@ -177,6 +196,33 @@ class ValidationContext():
         :param weak_hash_algos:
             A set of unicode strings of hash algorithms that should be
             considered weak. Valid options include: "md2", "md5", "sha1"
+
+        :param initial_policy_set:
+            None or an iterable of unicode strings containing certificate
+            policy OIDs that are acceptable. The special value "any_policy"
+            means that any policy is acceptable and is the default.
+
+        :param initial_explicit_policy:
+            A bool - if the initial-explicit-policy input to the path
+            validation algorithm should be True
+
+        :param initial_policy_mapping_inhibit:
+            A bool - if the initial-policy-mapping-inhibit input to the path
+            validation algorithm should be True
+
+        :param initial_any_policy_inhibit:
+            A bool - if the initial-any-policy-inhibit input to the path
+            validation algorithm should be True
+
+        :param initial_permitted_subtrees:
+            None or a list of asn1crypto.x509.GeneralSubtree objects,
+            asn1crypto.x509.GeneralName objects, or dicts that can be used to
+            construct a GeneralSubtree, describing the initial permitted
+            subtrees
+
+        :param initial_excluded_subtrees:
+            None or a list in the same format as initial_permitted_subtrees
+            describing the initial excluded subtrees
         """
 
         if crls is not None:
@@ -329,6 +375,84 @@ class ValidationContext():
         else:
             weak_hash_algos = set(['md2', 'md5'])
 
+        if initial_policy_set is None:
+            initial_policy_set = set(['any_policy'])
+        else:
+            if isinstance(initial_policy_set, str_cls):
+                raise TypeError(pretty_message(
+                    '''
+                    initial_policy_set must be an iterable of unicode strings,
+                    not %s
+                    ''',
+                    type_name(initial_policy_set)
+                ))
+            if not isinstance(initial_policy_set, (list, tuple, set, frozenset)):
+                raise TypeError(pretty_message(
+                    '''
+                    initial_policy_set must be a list, tuple or set of unicode
+                    strings, not %s
+                    ''',
+                    type_name(initial_policy_set)
+                ))
+            new_initial_policy_set = set()
+            for policy_identifier in initial_policy_set:
+                if not isinstance(policy_identifier, str_cls):
+                    raise TypeError(pretty_message(
+                        '''
+                        initial_policy_set must contain only unicode strings,
+                        not %s
+                        ''',
+                        type_name(policy_identifier)
+                    ))
+                if not policy_identifier:
+                    raise ValueError(pretty_message(
+                        '''
+                        initial_policy_set must not contain an empty string
+                        '''
+                    ))
+                new_initial_policy_set.add(policy_identifier)
+            if not new_initial_policy_set:
+                raise ValueError(pretty_message(
+                    '''
+                    initial_policy_set must contain at least one policy
+                    identifier
+                    '''
+                ))
+            initial_policy_set = new_initial_policy_set
+
+        if not isinstance(initial_explicit_policy, bool):
+            raise TypeError(pretty_message(
+                '''
+                initial_explicit_policy must be a boolean, not %s
+                ''',
+                type_name(initial_explicit_policy)
+            ))
+
+        if not isinstance(initial_policy_mapping_inhibit, bool):
+            raise TypeError(pretty_message(
+                '''
+                initial_policy_mapping_inhibit must be a boolean, not %s
+                ''',
+                type_name(initial_policy_mapping_inhibit)
+            ))
+
+        if not isinstance(initial_any_policy_inhibit, bool):
+            raise TypeError(pretty_message(
+                '''
+                initial_any_policy_inhibit must be a boolean, not %s
+                ''',
+                type_name(initial_any_policy_inhibit)
+            ))
+
+        initial_permitted_subtrees = self._coerce_general_subtrees(
+            initial_permitted_subtrees,
+            'initial_permitted_subtrees'
+        )
+        initial_excluded_subtrees = self._coerce_general_subtrees(
+            initial_excluded_subtrees,
+            'initial_excluded_subtrees'
+        )
+
         self.certificate_registry = CertificateRegistry(
             trust_roots,
             extra_trust_roots,
@@ -362,6 +486,64 @@ class ValidationContext():
         self._revocation_mode = revocation_mode
         self._soft_fail_exceptions = []
         self.weak_hash_algos = weak_hash_algos
+        self.initial_policy_set = initial_policy_set
+        self.initial_explicit_policy = initial_explicit_policy
+        self.initial_policy_mapping_inhibit = initial_policy_mapping_inhibit
+        self.initial_any_policy_inhibit = initial_any_policy_inhibit
+        self.initial_permitted_subtrees = initial_permitted_subtrees
+        self.initial_excluded_subtrees = initial_excluded_subtrees
+
+    @staticmethod
+    def _coerce_general_subtrees(value, name):
+        """
+        Validates and normalizes initial-permitted-subtrees and
+        initial-excluded-subtrees values.
+
+        :param value:
+            None or a list of asn1crypto.x509.GeneralSubtree objects,
+            asn1crypto.x509.GeneralName objects, or dicts
+
+        :param name:
+            A unicode string of the parameter name, for exception messages
+
+        :return:
+            None or a list of asn1crypto.x509.GeneralSubtree objects
+        """
+
+        if value is None:
+            return None
+
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(pretty_message(
+                '''
+                %s must be a list of asn1crypto.x509.GeneralSubtree objects,
+                not %s
+                ''',
+                name,
+                type_name(value)
+            ))
+
+        output = []
+        for subtree in value:
+            if isinstance(subtree, x509.GeneralSubtree):
+                output.append(subtree)
+                continue
+            if isinstance(subtree, x509.GeneralName):
+                output.append(x509.GeneralSubtree({'base': subtree}))
+                continue
+            if isinstance(subtree, dict):
+                output.append(x509.GeneralSubtree(subtree))
+                continue
+            raise TypeError(pretty_message(
+                '''
+                %s must contain only asn1crypto.x509.GeneralSubtree objects,
+                asn1crypto.x509.GeneralName objects or dicts, not %s
+                ''',
+                name,
+                type_name(subtree)
+            ))
+
+        return output
 
     @property
     def crls(self):

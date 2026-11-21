@@ -110,7 +110,10 @@
 > > def __init__(self, trust_roots=None, extra_trust_roots=None, other_certs=None,
 > >              whitelisted_certs=None, moment=None, allow_fetching=False, crls=None,
 > >              crl_fetch_params=None, ocsps=None, ocsp_fetch_params=None,
-> >              revocation_mode="soft-fail", weak_hash_algos=None):
+> >              revocation_mode="soft-fail", weak_hash_algos=None,
+> >              initial_policy_set=None, initial_explicit_policy=False,
+> >              initial_policy_mapping_inhibit=False, initial_any_policy_inhibit=False,
+> >              initial_permitted_subtrees=None, initial_excluded_subtrees=None):
 > >     """
 > >     :param trust_roots:
 > >         If the operating system's trust list should not be used, instead
@@ -185,6 +188,33 @@
 > >     :param weak_hash_algos:
 > >         A set of unicode strings of hash algorithms that should be
 > >         considered weak. Valid options include: "md2", "md5", "sha1"
+> >
+> >     :param initial_policy_set:
+> >         None or an iterable of unicode strings containing certificate
+> >         policy OIDs that are acceptable. The special value "any_policy"
+> >         means that any policy is acceptable and is the default.
+> >
+> >     :param initial_explicit_policy:
+> >         A bool - if the initial-explicit-policy input to the path
+> >         validation algorithm should be True
+> >
+> >     :param initial_policy_mapping_inhibit:
+> >         A bool - if the initial-policy-mapping-inhibit input to the path
+> >         validation algorithm should be True
+> >
+> >     :param initial_any_policy_inhibit:
+> >         A bool - if the initial-any-policy-inhibit input to the path
+> >         validation algorithm should be True
+> >
+> >     :param initial_permitted_subtrees:
+> >         None or a list of asn1crypto.x509.GeneralSubtree objects,
+> >         asn1crypto.x509.GeneralName objects, or dicts that can be used to
+> >         construct a GeneralSubtree, describing the initial permitted
+> >         subtrees
+> >
+> >     :param initial_excluded_subtrees:
+> >         None or a list in the same format as initial_permitted_subtrees
+> >         describing the initial excluded subtrees
 > >     """
 > > ```
 >

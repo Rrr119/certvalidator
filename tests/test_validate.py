@@ -740,6 +740,209 @@ class ValidateTests(unittest.TestCase):
         with self.assertRaisesRegex(PathValidationError, expected):
             validate_path(context, path)
 
+    @data('constraint_chain_info', True)
+    def constraint_chain(self, cert_filename, other_cert_files, crl_files, path_len,
+                         initial_policy_set, initial_explicit_policy, excp_class, excp_msg):
+        cert = self._load_nist_cert(cert_filename)
+        ca_certs = [self._load_nist_cert('TrustAnchorRootCertificate.crt')]
+        other_certs = [self._load_nist_cert(filename) for filename in other_cert_files]
+        crls = [self._load_nist_crl(filename) for filename in crl_files]
+        crls.append(self._load_nist_crl('TrustAnchorRootCRL.crl'))
+
+        context = ValidationContext(
+            trust_roots=ca_certs,
+            other_certs=other_certs,
+            crls=crls,
+            revocation_mode='require',
+            initial_policy_set=initial_policy_set,
+            initial_explicit_policy=initial_explicit_policy
+        )
+
+        paths = context.certificate_registry.build_paths(cert)
+        self.assertEqual(1, len(paths))
+        path = paths[0]
+        self.assertEqual(path_len, len(path))
+
+        if excp_class:
+            with self.assertRaisesRegex(excp_class, excp_msg):
+                validate_path(context, path)
+        else:
+            validate_path(context, path)
+
+    @staticmethod
+    def constraint_chain_info():
+        policy_1 = '2.16.840.1.101.3.2.1.48.1'
+        policy_2 = '2.16.840.1.101.3.2.1.48.2'
+
+        return (
+            (
+                '01_initial_policy_mapping_valid',
+                'ValidPolicyMappingTest11EE.crt',
+                [
+                    'GoodCACert.crt',
+                    'GoodsubCAPanyPolicyMapping1to2CACert.crt',
+                ],
+                [
+                    'GoodCACRL.crl',
+                    'GoodsubCAPanyPolicyMapping1to2CACRL.crl',
+                ],
+                4,
+                set([policy_1]),
+                True,
+                None,
+                None,
+            ),
+            (
+                '02_initial_policy_mapping_invalid',
+                'ValidPolicyMappingTest11EE.crt',
+                [
+                    'GoodCACert.crt',
+                    'GoodsubCAPanyPolicyMapping1to2CACert.crt',
+                ],
+                [
+                    'GoodCACRL.crl',
+                    'GoodsubCAPanyPolicyMapping1to2CACRL.crl',
+                ],
+                4,
+                set([policy_2]),
+                True,
+                PathValidationError,
+                'no valid set of policies',
+            ),
+            (
+                '03_require_explicit_policy_valid',
+                'ValidrequireExplicitPolicyTest4EE.crt',
+                [
+                    'requireExplicitPolicy0CACert.crt',
+                    'requireExplicitPolicy0subCACert.crt',
+                    'requireExplicitPolicy0subsubCACert.crt',
+                    'requireExplicitPolicy0subsubsubCACert.crt',
+                ],
+                [
+                    'requireExplicitPolicy0CACRL.crl',
+                    'requireExplicitPolicy0subCACRL.crl',
+                    'requireExplicitPolicy0subsubCACRL.crl',
+                    'requireExplicitPolicy0subsubsubCACRL.crl',
+                ],
+                6,
+                None,
+                False,
+                None,
+                None,
+            ),
+            (
+                '04_require_explicit_policy_invalid',
+                'InvalidrequireExplicitPolicyTest3EE.crt',
+                [
+                    'requireExplicitPolicy4CACert.crt',
+                    'requireExplicitPolicy4subCACert.crt',
+                    'requireExplicitPolicy4subsubCACert.crt',
+                    'requireExplicitPolicy4subsubsubCACert.crt',
+                ],
+                [
+                    'requireExplicitPolicy4CACRL.crl',
+                    'requireExplicitPolicy4subCACRL.crl',
+                    'requireExplicitPolicy4subsubCACRL.crl',
+                    'requireExplicitPolicy4subsubsubCACRL.crl',
+                ],
+                6,
+                None,
+                False,
+                PathValidationError,
+                'no valid set of policies',
+            ),
+            (
+                '05_dn_name_constraints_valid',
+                'ValidDNnameConstraintsTest1EE.crt',
+                [
+                    'nameConstraintsDN1CACert.crt',
+                ],
+                [
+                    'nameConstraintsDN1CACRL.crl',
+                ],
+                3,
+                None,
+                False,
+                None,
+                None,
+            ),
+            (
+                '06_dn_name_constraints_invalid',
+                'InvalidDNnameConstraintsTest7EE.crt',
+                [
+                    'nameConstraintsDN3CACert.crt',
+                ],
+                [
+                    'nameConstraintsDN3CACRL.crl',
+                ],
+                3,
+                None,
+                False,
+                PathValidationError,
+                'excluded by the name constraints',
+            ),
+            (
+                '07_dns_name_constraints_valid',
+                'ValidDNSnameConstraintsTest30EE.crt',
+                [
+                    'nameConstraintsDNS1CACert.crt',
+                ],
+                [
+                    'nameConstraintsDNS1CACRL.crl',
+                ],
+                3,
+                None,
+                False,
+                None,
+                None,
+            ),
+            (
+                '08_rfc822_name_constraints_valid',
+                'ValidRFC822nameConstraintsTest23EE.crt',
+                [
+                    'nameConstraintsRFC822CA2Cert.crt',
+                ],
+                [
+                    'nameConstraintsRFC822CA2CRL.crl',
+                ],
+                3,
+                None,
+                False,
+                None,
+                None,
+            ),
+            (
+                '09_uri_name_constraints_invalid',
+                'InvalidURInameConstraintsTest35EE.crt',
+                [
+                    'nameConstraintsURI1CACert.crt',
+                ],
+                [
+                    'nameConstraintsURI1CACRL.crl',
+                ],
+                3,
+                None,
+                False,
+                PathValidationError,
+                'not permitted by the name constraints',
+            ),
+            (
+                '10_revocation_crl_revoked',
+                'InvalidRevokedEETest3EE.crt',
+                [
+                    'GoodCACert.crt',
+                ],
+                [
+                    'GoodCACRL.crl',
+                ],
+                3,
+                None,
+                False,
+                RevokedError,
+                'CRL indicates the end-entity certificate was revoked',
+            ),
+        )
+
     @data('nist_info', True)
     def nist(self, cert_filename, other_cert_files, crl_files, path_len, require_rev, excp_class, excp_msg):
         cert = self._load_nist_cert(cert_filename)

@@ -5,6 +5,7 @@
  - [Advanced Features](#advanced-features)
    - [Whitelisting Certificates](#whitelisting-certificates)
    - [Blacklisting Hash Algorithms](#blacklisting-hash-algorithms)
+   - [Certificate Policies and Name Constraints](#certificate-policies-and-name-constraints)
    - [Revocation Checking](#revocation-checking)
    - [Custom Trust Roots/CA Certs](#custom-trust-rootsca-certs)
    - [Moment-In-Time Validation](#moment-in-time-validation)
@@ -128,6 +129,7 @@ keyword parameter to the `CertificateValidator()`.
 
  - [Whitelisting Certificates](#whitelisting-certificates)
  - [Blacklisting Hash Algorithms](#blacklisting-hash-algorithms)
+ - [Certificate Policies and Name Constraints](#certificate-policies-and-name-constraints)
  - [Revocation Checking](#revocation-checking)
  - [Custom Trust Roots/CA Certs](#custom-trust-roots-ca-certs)
  - [Moment-In-Time Validation](#moment-in-time-validation)
@@ -201,6 +203,42 @@ validator = CertificateValidator(end_entity_cert, validation_context=context)
 
 Valid algorithm names are the unicode strings: `"md2"`, `"md5"`, `"sha1"`,
 `"sha256"`, `"sha384"` and `"sha512"`.
+
+### Certificate Policies and Name Constraints
+
+The path validation algorithm processes `certificatePolicies`,
+`policyMappings`, `policyConstraints` and `inhibitAnyPolicy` extensions from
+the certificates in the path. By default any policy is acceptable, matching the
+RFC 5280 default `initial-policy-set` of `anyPolicy`.
+
+An application that requires specific certificate policies can provide the
+policy OIDs via `initial_policy_set`. If policy processing must fail when no
+valid policy remains, also set `initial_explicit_policy` to `True`.
+
+```python
+from certvalidator import CertificateValidator, ValidationContext
+
+context = ValidationContext(
+    initial_policy_set=set(['1.2.3.4']),
+    initial_explicit_policy=True
+)
+validator = CertificateValidator(
+    end_entity_cert,
+    intermediate_certs,
+    validation_context=context
+)
+validator.validate_usage(set(['digital_signature']))
+```
+
+The `initial_policy_mapping_inhibit` and `initial_any_policy_inhibit` keyword
+parameters map to the corresponding RFC 5280 path validation inputs.
+
+Name constraints in CA certificates are enforced automatically for distinguished
+names, DNS names, email addresses, URIs and IP addresses. Initial permitted or
+excluded subtrees can also be supplied using
+`initial_permitted_subtrees` and `initial_excluded_subtrees`; each item may be an
+`asn1crypto.x509.GeneralSubtree`, `asn1crypto.x509.GeneralName` or a dict
+accepted by `asn1crypto.x509.GeneralSubtree()`.
 
 ### Revocation Checking
 

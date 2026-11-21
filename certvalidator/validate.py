@@ -1,6 +1,8 @@
 # coding: utf-8
 from __future__ import unicode_literals, division, absolute_import, print_function
 
+import sys
+
 from asn1crypto import x509, crl
 from oscrypto import asymmetric
 import oscrypto.errors
@@ -21,12 +23,16 @@ from .errors import (
 )
 from .path import ValidationPath
 
+if sys.version_info < (3,):
+    from urlparse import urlsplit
+else:
+    from urllib.parse import urlsplit
+
 
 def validate_path(validation_context, path):
     """
     Validates the path using the algorithm from
-    https://tools.ietf.org/html/rfc5280#section-6.1, with the exception
-    that name constraints are not checked or enforced.
+    https://tools.ietf.org/html/rfc5280#section-6.1.
 
     Critical extensions on the end-entity certificate are not validated
     and are left up to the consuming application to process and/or fail on.
@@ -262,22 +268,25 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
     # the trust anchor is not part of the path
     path_length = len(path) - 1
 
-    # We don't accept any certificate policy or name constraint values as input
-    # and instead just start allowing everything during initialization
-
     # Step 1: initialization
 
     # Step 1 a
-    valid_policy_tree = PolicyTreeRoot('any_policy', set(), set(['any_policy']))
+    valid_policy_tree = _build_initial_policy_tree(validation_context.initial_policy_set)
 
-    # Steps 1 b-c skipped since they relate to name constraints
+    # Steps 1 b-c
+    permitted_subtree_groups = []
+    if validation_context.initial_permitted_subtrees:
+        permitted_subtree_groups.append(validation_context.initial_permitted_subtrees)
+    excluded_subtrees = list(validation_context.initial_excluded_subtrees or [])
+
+    # Name constraints on a trust anchor are part of the trust anchor
+    # information used as input to path validation
+    _add_name_constraints(trust_anchor, permitted_subtree_groups, excluded_subtrees)
 
     # Steps 1 d-f
-    # We do not use initial-explicit-policy, initial-any-policy-inhibit or
-    # initial-policy-mapping-inhibit, so they are all set to the path length + 1
-    explicit_policy = path_length + 1
-    inhibit_any_policy = path_length + 1
-    policy_mapping = path_length + 1
+    explicit_policy = 0 if validation_context.initial_explicit_policy else path_length + 1
+    inhibit_any_policy = 0 if validation_context.initial_any_policy_inhibit else path_length + 1
+    policy_mapping = 0 if validation_context.initial_policy_mapping_inhibit else path_length + 1
 
     # Steps 1 g-i
     working_public_key = trust_anchor.public_key
@@ -448,7 +457,16 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
                 _cert_type(index, last_index, end_entity_name_override),
             ))
 
-        # Steps 2 b-c skipped since they relate to name constraints
+        # Steps 2 b-c
+        # RFC 5280 section 4.2.1.10 exempts self-issued intermediate
+        # certificates from name constraints to allow key rollover
+        if not cert.self_issued or index == last_index:
+            _check_name_constraints(
+                cert,
+                permitted_subtree_groups,
+                excluded_subtrees,
+                _cert_type(index, last_index, end_entity_name_override)
+            )
 
         # Steps 2 d
         if cert.certificate_policies_value and valid_policy_tree is not None:
@@ -585,6 +603,9 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
             # Step 3 c
             working_issuer_name = cert.subject
 
+            # Step 3 g
+            _add_name_constraints(cert, permitted_subtree_groups, excluded_subtrees)
+
             # Steps 3 d-f
 
             # Handle inheritance of DSA parameters from a signing CA to the
@@ -598,8 +619,6 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
 
             if copy_params:
                 working_public_key['algorithm']['parameters'] = copy_params
-
-            # Step 3 g skipped since it relates to name constraints
 
             # Step 3 h
             if not cert.self_issued:
@@ -678,6 +697,9 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
             'policy_mappings',
             'policy_constraints',
             'inhibit_any_policy',
+            'name_constraints',
+            'subject_alt_name',
+            'issuer_alt_name',
         ])
         unsupported_critical_extensions = cert.critical_extensions - supported_extensions
         if unsupported_critical_extensions:
@@ -733,6 +755,454 @@ def _validate_path(validation_context, path, end_entity_name_override=None):
         ))
 
     return cert
+
+
+def _build_initial_policy_tree(initial_policy_set):
+    """
+    Builds the initial valid_policy_tree for the path validation algorithm.
+
+    :param initial_policy_set:
+        A set of unicode strings containing policy OIDs, or the special value
+        "any_policy"
+
+    :return:
+        None or a PolicyTreeRoot object
+    """
+
+    if not initial_policy_set:
+        return None
+
+    root = PolicyTreeRoot.__new__(PolicyTreeRoot)
+    root.children = []
+
+    if 'any_policy' in initial_policy_set:
+        root.add_child('any_policy', [], set(['any_policy']))
+        return root
+
+    for policy_identifier in sorted(initial_policy_set):
+        root.add_child(policy_identifier, [], set([policy_identifier]))
+
+    return root
+
+
+def _add_name_constraints(cert, permitted_subtree_groups, excluded_subtrees):
+    """
+    Adds the name constraints from a certificate to the state used to validate
+    the next certificate in the path.
+
+    :param cert:
+        An asn1crypto.x509.Certificate object
+
+    :param permitted_subtree_groups:
+        A list of lists of asn1crypto.x509.GeneralSubtree objects. Each inner
+        list is the permitted subtree set from one certificate and all names
+        must be within each inner list that contains the applicable name type.
+
+    :param excluded_subtrees:
+        A list of asn1crypto.x509.GeneralSubtree objects
+    """
+
+    name_constraints = cert.name_constraints_value
+    if not name_constraints:
+        return
+
+    permitted_subtrees = name_constraints['permitted_subtrees']
+    if permitted_subtrees:
+        group = []
+        for subtree in permitted_subtrees:
+            _validate_general_subtree(subtree)
+            group.append(subtree)
+        if group:
+            permitted_subtree_groups.append(group)
+
+    excluded = name_constraints['excluded_subtrees']
+    if excluded:
+        for subtree in excluded:
+            _validate_general_subtree(subtree)
+            excluded_subtrees.append(subtree)
+
+
+def _validate_general_subtree(subtree):
+    """
+    Ensures a GeneralSubtree uses the only form permitted by RFC 5280.
+
+    :param subtree:
+        An asn1crypto.x509.GeneralSubtree object
+    """
+
+    minimum = subtree['minimum'].native
+    maximum = subtree['maximum'].native
+    if minimum != 0 or maximum is not None:
+        raise PathValidationError(pretty_message(
+            '''
+            The path could not be validated because a name constraint uses an
+            unsupported minimum or maximum value
+            '''
+        ))
+
+
+def _check_name_constraints(cert, permitted_subtree_groups, excluded_subtrees, cert_description):
+    """
+    Checks the subject distinguished name and subject alternative names of a
+    certificate against the name constraints accumulated from the path.
+
+    :param cert:
+        An asn1crypto.x509.Certificate object to check
+
+    :param permitted_subtree_groups:
+        A list of lists of asn1crypto.x509.GeneralSubtree objects
+
+    :param excluded_subtrees:
+        A list of asn1crypto.x509.GeneralSubtree objects
+
+    :param cert_description:
+        A unicode string describing the certificate for error messages
+    """
+
+    for group in permitted_subtree_groups:
+        for subtree in group:
+            _validate_general_subtree(subtree)
+    for subtree in excluded_subtrees:
+        _validate_general_subtree(subtree)
+
+    candidates = []
+
+    if len(cert.subject.chosen):
+        candidates.append((
+            'directory_name',
+            cert.subject.chosen,
+            cert.subject.human_friendly,
+            'subject name'
+        ))
+
+    subject_alt_name = cert.subject_alt_name_value
+    if subject_alt_name:
+        for general_name in subject_alt_name:
+            candidates.append((
+                general_name.name,
+                _general_name_value(general_name),
+                general_name.native,
+                'subject alternative name'
+            ))
+
+    # RFC 5280 section 4.2.1.10 requires email addresses in the subject DN to
+    # be checked against rfc822Name constraints when there is no SAN extension
+    if subject_alt_name is None:
+        for rdn in cert.subject.chosen:
+            for name_type_and_value in rdn:
+                if name_type_and_value['type'].native != 'email_address':
+                    continue
+                email_address = name_type_and_value['value'].native
+                candidates.append((
+                    'rfc822_name',
+                    email_address,
+                    email_address,
+                    'subject distinguished name email address'
+                ))
+
+    for name_type, value, display_value, description in candidates:
+        for group in permitted_subtree_groups:
+            matching_subtrees = [
+                subtree for subtree in group
+                if subtree['base'].name == name_type
+            ]
+            if not matching_subtrees:
+                continue
+            if not any(_candidate_matches(name_type, value, subtree['base']) for subtree in matching_subtrees):
+                raise PathValidationError(pretty_message(
+                    '''
+                    The path could not be validated because the %s %s "%s" is
+                    not permitted by the name constraints
+                    ''',
+                    cert_description,
+                    description,
+                    display_value
+                ))
+
+        for subtree in excluded_subtrees:
+            if not _candidate_matches(name_type, value, subtree['base']):
+                continue
+            raise PathValidationError(pretty_message(
+                '''
+                The path could not be validated because the %s %s "%s" is
+                excluded by the name constraints
+                ''',
+                cert_description,
+                description,
+                display_value
+            ))
+
+
+def _general_name_value(general_name):
+    """
+    Returns the value used for name constraint matching.
+
+    :param general_name:
+        An asn1crypto.x509.GeneralName object
+
+    :return:
+        A value suitable for the name type
+    """
+
+    if general_name.name in set(['other_name', 'x400_address', 'edi_party_name']):
+        return general_name.chosen.dump()
+    if general_name.name in (
+            'dns_name',
+            'rfc822_name',
+            'uniform_resource_identifier',
+            'registered_id'):
+        return general_name.chosen.native
+    return general_name.chosen
+
+
+def _candidate_matches(name_type, value, base):
+    """
+    Determines if a name is within a GeneralSubtree base.
+
+    :param name_type:
+        A unicode string of the GeneralName choice name
+
+    :param value:
+        The value for the GeneralName choice
+
+    :param base:
+        An asn1crypto.x509.GeneralName object containing the subtree base
+
+    :return:
+        A bool - if the name is within the subtree
+    """
+
+    if base.name != name_type:
+        return False
+
+    if name_type == 'directory_name':
+        return _directory_name_within(value, base.chosen)
+
+    if name_type == 'dns_name':
+        return _dns_name_within(value, base.chosen.native)
+
+    if name_type == 'rfc822_name':
+        return _rfc822_name_within(value, base.chosen.native)
+
+    if name_type == 'uniform_resource_identifier':
+        return _uri_within(value, base.chosen.native)
+
+    if name_type == 'ip_address':
+        return _ip_address_within(value, base.chosen)
+
+    if name_type == 'registered_id':
+        return value == base.chosen.native
+
+    return value == base.chosen.dump()
+
+
+def _name_attribute_value(name_type_and_value):
+    """
+    Returns a normalized value for an RDN attribute.
+
+    :param name_type_and_value:
+        An asn1crypto.x509.NameTypeAndValue object
+
+    :return:
+        A value suitable for equality comparison
+    """
+
+    try:
+        return name_type_and_value.prepped_value
+    except (ValueError, TypeError):
+        return name_type_and_value['value'].native
+
+
+def _rdn_within(subject_rdn, base_rdn):
+    """
+    Determines if all attributes in a base RDN are present in a subject RDN.
+
+    :param subject_rdn:
+        An asn1crypto.x509.RelativeDistinguishedName object
+
+    :param base_rdn:
+        An asn1crypto.x509.RelativeDistinguishedName object
+
+    :return:
+        A bool - if the base RDN is a subset of the subject RDN
+    """
+
+    subject_values = []
+    for name_type_and_value in subject_rdn:
+        subject_values.append((
+            name_type_and_value['type'].native,
+            _name_attribute_value(name_type_and_value)
+        ))
+
+    for name_type_and_value in base_rdn:
+        base_value = (
+            name_type_and_value['type'].native,
+            _name_attribute_value(name_type_and_value)
+        )
+        if base_value not in subject_values:
+            return False
+        subject_values.remove(base_value)
+
+    return True
+
+
+def _directory_name_within(subject_name, base_name):
+    """
+    Determines if a directory name is within a directoryName subtree.
+
+    :param subject_name:
+        An asn1crypto.x509.RDNSequence object
+
+    :param base_name:
+        An asn1crypto.x509.RDNSequence object
+
+    :return:
+        A bool - if the subject name is within the subtree
+    """
+
+    if isinstance(subject_name, x509.Name):
+        subject_name = subject_name.chosen
+    if isinstance(base_name, x509.Name):
+        base_name = base_name.chosen
+
+    subject_rdns = list(subject_name)
+    base_rdns = list(base_name)
+
+    if len(base_rdns) > len(subject_rdns):
+        return False
+
+    for index, base_rdn in enumerate(base_rdns):
+        if not _rdn_within(subject_rdns[index], base_rdn):
+            return False
+
+    return True
+
+
+def _normalize_domain(value):
+    """
+    Normalizes a domain name for constraint comparison.
+
+    :param value:
+        A unicode string
+
+    :return:
+        A lower-case unicode string with any trailing period removed
+    """
+
+    return value.lower().rstrip('.')
+
+
+def _dns_name_within(subject_name, base_name):
+    """
+    Determines if a DNS name is within a dNSName subtree.
+
+    :param subject_name:
+        A unicode string of the DNS name
+
+    :param base_name:
+        A unicode string of the subtree base
+
+    :return:
+        A bool - if the DNS name is within the subtree
+    """
+
+    subject_name = _normalize_domain(subject_name)
+    base_name = _normalize_domain(base_name)
+
+    if base_name.startswith('.'):
+        return subject_name.endswith(base_name)
+
+    return subject_name == base_name or subject_name.endswith('.' + base_name)
+
+
+def _rfc822_name_within(subject_name, base_name):
+    """
+    Determines if an email address is within an rfc822Name subtree.
+
+    :param subject_name:
+        A unicode string of the email address
+
+    :param base_name:
+        A unicode string of the subtree base
+
+    :return:
+        A bool - if the email address is within the subtree
+    """
+
+    subject_name = subject_name.lower()
+    base_name = base_name.lower()
+
+    if '@' in base_name:
+        return subject_name == base_name
+
+    if '@' not in subject_name:
+        return False
+
+    subject_domain = subject_name.rsplit('@', 1)[1]
+    if base_name.startswith('.'):
+        return subject_domain.endswith(base_name)
+
+    return subject_domain == base_name
+
+
+def _uri_within(subject_uri, base_uri):
+    """
+    Determines if the host part of a URI is within a uniformResourceIdentifier
+    subtree.
+
+    :param subject_uri:
+        A unicode string of the URI
+
+    :param base_uri:
+        A unicode string of the subtree base
+
+    :return:
+        A bool - if the URI host is within the subtree
+    """
+
+    try:
+        subject_host = urlsplit(subject_uri).hostname
+    except (TypeError, ValueError):
+        return False
+
+    if not subject_host:
+        return False
+
+    subject_host = _normalize_domain(subject_host)
+    base_host = _normalize_domain(base_uri)
+
+    if base_host.startswith('.'):
+        return subject_host.endswith(base_host)
+
+    return subject_host == base_host
+
+
+def _ip_address_within(subject_ip, base_ip):
+    """
+    Determines if an IP address is within an iPAddress subtree.
+
+    :param subject_ip:
+        An asn1crypto.x509.IPAddress object
+
+    :param base_ip:
+        An asn1crypto.x509.IPAddress object containing an address and mask
+
+    :return:
+        A bool - if the IP address is within the subtree
+    """
+
+    subject_bytes = bytearray(subject_ip.contents)
+    base_bytes = bytearray(base_ip.contents)
+
+    if len(base_bytes) != len(subject_bytes) * 2:
+        return False
+
+    for index in range(len(subject_bytes)):
+        mask = base_bytes[len(subject_bytes) + index]
+        if subject_bytes[index] & mask != base_bytes[index] & mask:
+            return False
+
+    return True
 
 
 def _cert_type(index, last_index, end_entity_name_override, definite=False):
